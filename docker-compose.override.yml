@@ -1,0 +1,39 @@
+# Proxmox LXC AppArmor Override
+#
+# Proxmox LXC containers do not grant CAP_MAC_ADMIN by default, so Docker
+# cannot load the docker-default AppArmor profile. This override sets all
+# containers to run unconfined.
+#
+# Only use this file if you're running Docker inside a Proxmox LXC.
+# On a bare-metal host or standard VM, you don't need this.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+# Or just place it alongside docker-compose.yml — Docker Compose auto-merges it.
+
+services:
+  caddy:
+    security_opt: [apparmor=unconfined]
+  jellyfin:
+    security_opt: [apparmor=unconfined]
+  plex:
+    security_opt: [apparmor=unconfined]
+  sonarr:
+    security_opt: [apparmor=unconfined]
+  radarr:
+    security_opt: [apparmor=unconfined]
+  gluetun:
+    security_opt: [apparmor=unconfined]
+  prowlarr:
+    security_opt: [apparmor=unconfined]
+  flaresolverr:
+    security_opt: [apparmor=unconfined]
+  bazarr:
+    security_opt: [apparmor=unconfined]
+  seerr:
+    security_opt: [apparmor=unconfined]
+  elasticsearch:
+    security_opt: [apparmor=unconfined]
+  redis:
+    security_opt: [apparmor=unconfined]
+  tubearchivist:
+    security_opt: [apparmor=unconfined]

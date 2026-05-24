@@ -1,0 +1,64 @@
+{
+	# Internal CA — no internet/ACME required
+	# Caddy signs its own certs; import the CA into your browser/OS to trust *.lan
+	local_certs
+	# Uncomment to enable admin API (needed to export the CA cert):
+	# admin localhost:2019
+}
+
+# ─── Media Servers ────────────────────────────────────────────────────────────
+
+jellyfin.lan {
+	reverse_proxy host.docker.internal:8096
+}
+
+plex.lan {
+	reverse_proxy host.docker.internal:32400
+}
+
+# ─── *arr Stack ───────────────────────────────────────────────────────────────
+
+sonarr.lan {
+	reverse_proxy sonarr:8989
+}
+
+radarr.lan {
+	reverse_proxy radarr:7878
+}
+
+prowlarr.lan {
+	reverse_proxy gluetun:9696
+}
+
+bazarr.lan {
+	reverse_proxy bazarr:6767
+}
+
+# ─── Request Portal ───────────────────────────────────────────────────────────
+
+seerr.lan {
+	reverse_proxy seerr:5055
+}
+
+# ─── YouTube Archive ──────────────────────────────────────────────────────────
+
+tubearchivist.lan {
+	reverse_proxy tubearchivist:8000
+}
+
+# ─── Optional: External Services ─────────────────────────────────────────────
+# Uncomment and set the correct IPs if you want Caddy to proxy other LAN services
+
+# qBittorrent (if running on a separate machine/LXC)
+# qbittorrent.lan {
+# 	reverse_proxy YOUR_QBIT_HOST_IP:8080
+# }
+
+# Proxmox — self-signed cert on backend, skip verify
+# proxmox.lan {
+# 	reverse_proxy https://YOUR_PROXMOX_IP:8006 {
+# 		transport http {
+# 			tls_insecure_skip_verify
+# 		}
+# 	}
+# }

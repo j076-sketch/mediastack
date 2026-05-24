@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+
+# Service config dirs (generated at runtime, may contain API keys/tokens)
+jellyfin/
+plex/
+sonarr/
+radarr/
+prowlarr/
+bazarr/
+seerr/
+jellyseerr/
+tubearchivist/
+elasticsearch/
+redis/
+caddy/data/
+caddy/config/

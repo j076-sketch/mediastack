@@ -1,0 +1,272 @@
+---
+# Home Media Stack — Docker Compose
+#
+# Services:
+#   Caddy         — reverse proxy + internal HTTPS (*.lan subdomains)
+#   Jellyfin      — media server (open source)
+#   Plex          — media server (optional, requires Plex Pass for HW transcode)
+#   Sonarr        — TV show management
+#   Radarr        — movie management
+#   Prowlarr      — indexer manager (routes through VPN)
+#   FlareSolverr  — Cloudflare bypass (routes through VPN)
+#   Bazarr        — subtitle management
+#   Seerr         — media request portal (Jellyfin variant)
+#   Gluetun       — VPN container (PIA or other providers)
+#   TubeArchivist — YouTube channel archiver
+#   Elasticsearch — search backend for TubeArchivist
+#   Redis         — cache backend for TubeArchivist
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and fill in all values
+#   2. Create media directories (see README)
+#   3. If running inside a Proxmox LXC, also use docker-compose.override.yml
+#
+# GPU hardware transcoding:
+#   Jellyfin and Plex are configured for Intel GPU (/dev/dri passthrough).
+#   If you don't have an Intel GPU, remove the `devices` and `group_add` blocks
+#   from the jellyfin and plex services.
+
+networks:
+  mediastack:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+services:
+
+  # ─── Reverse Proxy + SSL ──────────────────────────────────────────────────────
+
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # Uncomment to expose Caddy admin API (for CA cert export):
+      # - "2019:2019"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - mediastack
+
+  # ─── Media Servers ────────────────────────────────────────────────────────────
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - JELLYFIN_PublishedServerUrl=https://jellyfin.lan
+    volumes:
+      - ./jellyfin/config:/config
+      - ./jellyfin/cache:/cache
+      - ${MEDIA_LIBRARY}:/media/library:ro
+      - ${MEDIA_DOWNLOADS}:/media/downloads:ro
+    devices:
+      - /dev/dri:/dev/dri     # Intel GPU — remove if no Intel iGPU/dGPU
+    group_add:
+      - "44"    # video group
+      - "992"   # render group — check `getent group render` on your host, may differ
+
+  plex:
+    image: plexinc/pms-docker:latest
+    container_name: plex
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PLEX_CLAIM=${PLEX_CLAIM}        # get from https://plex.tv/claim (4 min expiry)
+      - ADVERTISE_IP=https://plex.lan/
+      - ALLOWED_NETWORKS=${LOCAL_SUBNET}
+      - PLEX_UID=1000
+      - PLEX_GID=1000
+    volumes:
+      - ./plex/config:/config
+      - ./plex/transcode:/transcode
+      - ${MEDIA_LIBRARY}:/media/library:ro
+      - ${MEDIA_DOWNLOADS}:/media/downloads:ro
+    devices:
+      - /dev/dri:/dev/dri     # Intel GPU — remove if not applicable
+    group_add:
+      - "44"
+      - "992"
+
+  # ─── Download Management ──────────────────────────────────────────────────────
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ./sonarr/config:/config
+      - ${MEDIA_LIBRARY}:/media/library
+      - ${MEDIA_DOWNLOADS}:/media/downloads
+    ports:
+      - "8989:8989"
+    networks:
+      - mediastack
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ./radarr/config:/config
+      - ${MEDIA_LIBRARY}:/media/library
+      - ${MEDIA_DOWNLOADS}:/media/downloads
+    ports:
+      - "7878:7878"
+    networks:
+      - mediastack
+
+  # ─── VPN + Cloudflare Bypass ──────────────────────────────────────────────────
+
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER}      # e.g. "private internet access"
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      - SERVER_REGIONS=${VPN_REGION}              # e.g. "US Silicon Valley"
+      - TZ=${TZ}
+      # Allow containers behind Gluetun to reach LAN + Docker bridge without VPN
+      - FIREWALL_OUTBOUND_SUBNETS=${LOCAL_SUBNET},172.18.0.0/16
+    ports:
+      - "9696:9696"    # Prowlarr
+      - "8191:8191"    # FlareSolverr
+    networks:
+      - mediastack
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    network_mode: "service:gluetun"   # all traffic exits via VPN
+    depends_on:
+      - gluetun
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ./prowlarr/config:/config
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    network_mode: "service:gluetun"   # exits via VPN
+    depends_on:
+      - gluetun
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ./bazarr/config:/config
+      - ${MEDIA_LIBRARY}:/media/library
+    ports:
+      - "6767:6767"
+    networks:
+      - mediastack
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+    volumes:
+      - ./seerr/config:/app/config
+    ports:
+      - "5055:5055"
+    networks:
+      - mediastack
+
+  # ─── YouTube Archive ──────────────────────────────────────────────────────────
+
+  elasticsearch:
+    image: elasticsearch:8.18.0
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - path.repo=/usr/share/elasticsearch/data/snapshot
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./elasticsearch/data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - mediastack
+
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: redis
+    restart: unless-stopped
+    volumes:
+      - ./redis/data:/data
+    networks:
+      - mediastack
+
+  tubearchivist:
+    image: bbilly1/tubearchivist:latest
+    container_name: tubearchivist
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+      - redis
+    ports:
+      - "8000:8000"
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - REDIS_CON=redis://redis:6379
+      - HOST_UID=1000
+      - HOST_GID=1000
+      - TA_HOST=${HOST_IP} tubearchivist.lan
+      - TA_USERNAME=${TA_USERNAME}
+      - TA_PASSWORD=${TA_PASSWORD}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - TZ=${TZ}
+      - TA_SECRET_KEY=${TA_SECRET_KEY}       # generate: python3 -c "import secrets; print(secrets.token_hex(32))"
+    volumes:
+      - ${MEDIA_DOWNLOADS}/tubearchivist:/youtube
+      - ./tubearchivist/cache:/cache
+    networks:
+      - mediastack
