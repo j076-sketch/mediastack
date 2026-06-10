@@ -1,17 +1,17 @@
 # Secrets — never commit
-.env
+mediastack/.env
 
 # Service config dirs (generated at runtime, may contain API keys/tokens)
-jellyfin/
-plex/
-sonarr/
-radarr/
-prowlarr/
-bazarr/
-seerr/
-jellyseerr/
-tubearchivist/
-elasticsearch/
-redis/
-caddy/data/
-caddy/config/
+mediastack/jellyfin/
+mediastack/plex/
+mediastack/sonarr/
+mediastack/radarr/
+mediastack/prowlarr/
+mediastack/bazarr/
+mediastack/seerr/
+mediastack/jellyseerr/
+mediastack/tubearchivist/
+mediastack/elasticsearch/
+mediastack/redis/
+mediastack/caddy/data/
+mediastack/caddy/config/
