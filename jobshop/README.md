@@ -1,6 +1,6 @@
 # ShopTasks
 
-Production task and assignment tracker for sheet metal / CNC shops. It does the work the ERP doesn't: who's doing what, what's blocked, what's overdue. Jobs, customers and inventory stay in the ERP; a task just carries an optional Job # / Part # as a reference.
+Production task and assignment tracker for sheet metal / CNC shops. It does the work the ERP doesn't: who's doing what, what's blocked, what's overdue. Jobs, customers, parts and inventory are out of scope. It's purely tasks, people and time.
 
 Node 22.13+ only, no dependencies (built-in `node:sqlite`).
 

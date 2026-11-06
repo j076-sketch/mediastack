@@ -30,12 +30,12 @@ function addDays(date, n) { const d = new Date((date || new Date().toISOString()
 function spawnNext(t) {
   const step = { daily: 1, weekly: 7, monthly: 30 }[t.recurrence]; if (!step) return;
   const base = t.due_date && t.due_date > new Date().toISOString().slice(0, 10) ? t.due_date : new Date().toISOString().slice(0, 10);
-  const id = Number(run(`INSERT INTO tasks(title,description,area_id,assignee_id,priority,type,due_date,job_ref,part_ref,est_min,recurrence) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-    t.title, t.description, t.area_id, t.assignee_id, t.priority, t.type, addDays(base, step), t.job_ref, t.part_ref, t.est_min, t.recurrence).lastInsertRowid);
+  const id = Number(run(`INSERT INTO tasks(title,description,area_id,assignee_id,priority,type,due_date,est_min,recurrence) VALUES(?,?,?,?,?,?,?,?,?)`,
+    t.title, t.description, t.area_id, t.assignee_id, t.priority, t.type, addDays(base, step), t.est_min, t.recurrence).lastInsertRowid);
   for (const c of q('SELECT text FROM checklist WHERE task_id=?', t.id)) run('INSERT INTO checklist(task_id,text) VALUES(?,?)', id, c.text);
 }
 
-const FIELDS = ['title','description','area_id','assignee_id','status','priority','type','due_date','job_ref','part_ref','est_min','blocked_reason','recurrence'];
+const FIELDS = ['title','description','area_id','assignee_id','status','priority','type','due_date','est_min','blocked_reason','recurrence'];
 function updateTask(id, b, who) {
   const old = one('SELECT * FROM tasks WHERE id=?', id); if (!old) throw [404, 'no such task'];
   if (b.status && !STATUSES.includes(b.status)) throw [400, 'bad status'];

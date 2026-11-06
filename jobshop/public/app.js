@@ -28,7 +28,7 @@ $('#me').onchange = async e => {
 const dueTag = t => !t.due_date ? '' : (t.due_date < today() && t.status !== 'Done') ? `<span class="late">${t.due_date} · overdue</span>` : t.due_date === today() ? `<b>Today</b>` : `<span class="sub">${t.due_date}</span>`;
 const areaTag = t => t.area ? `<span class="tag" style="background:${t.area_color}">${esc(t.area)}</span>` : '';
 const card = t => `<div class="card ${t.priority} ${t.timer_started ? 'timer' : ''}" draggable="true" data-id="${t.id}">
-  <b>${esc(t.title)}</b><div class="chips">${areaTag(t)}${t.job_ref ? `<span class="pill">${esc(t.job_ref)}</span>` : ''}${t.type !== 'Production' ? `<span class="pill">${esc(t.type)}</span>` : ''}${t.recurrence !== 'none' ? '<span class="pill">↻ ' + t.recurrence + '</span>' : ''}${t.priority === 'urgent' ? '<span class="pill urgent">URGENT</span>' : ''}</div>
+  <b>${esc(t.title)}</b><div class="chips">${areaTag(t)}${t.type !== 'Production' ? `<span class="pill">${esc(t.type)}</span>` : ''}${t.recurrence !== 'none' ? '<span class="pill">↻ ' + t.recurrence + '</span>' : ''}${t.priority === 'urgent' ? '<span class="pill urgent">URGENT</span>' : ''}</div>
   ${t.status === 'Blocked' && t.blocked_reason ? `<div class="blk">⛔ ${esc(t.blocked_reason)}</div>` : ''}
   <div class="sub" style="display:flex;justify-content:space-between;margin-top:6px"><span>${dueTag(t)} ${t.cl_total ? `· ☑ ${t.cl_done}/${t.cl_total}` : ''}${t.est_min ? ` · ${hrs(t.actual_min)}/${hrs(t.est_min)}` : ''}</span>${t.assignee ? `<span class="who" title="${esc(t.assignee)}">${ini(t.assignee)}</span>` : '<span class="pill">unassigned</span>'}</div></div>`;
 
@@ -46,11 +46,11 @@ async function render() {
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
   const tasks = await api('GET', '/tasks');
   const shown = tasks.filter(t => (!flt.area || t.area_id == flt.area) && (!flt.type || t.type === flt.type)
-    && (!flt.q || [t.title, t.job_ref, t.part_ref, t.assignee].join(' ').toLowerCase().includes(flt.q.toLowerCase())));
+    && (!flt.q || [t.title, t.description, t.assignee].join(' ').toLowerCase().includes(flt.q.toLowerCase())));
   $('#top').innerHTML = view === 'dash' ? '' : `<div class="quick"><input id="qa" placeholder="Add a task and press Enter…  (assigned to you in My Tasks)"></div>
     <div class="filters"><select id="fa"><option value="">All areas</option>${meta.areas.map(a => `<option value="${a.id}" ${flt.area == a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
     <select id="ft"><option value="">All types</option>${meta.types.map(t => `<option ${flt.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
-    <input id="fq" placeholder="Search title / job # / person" value="${esc(flt.q)}"></div>`;
+    <input id="fq" placeholder="Search title / person" value="${esc(flt.q)}"></div>`;
   if (view !== 'dash') {
     $('#qa').onkeydown = async e => { if (e.key === 'Enter' && e.target.value.trim()) { await api('POST', '/tasks', { title: e.target.value, assignee_id: view === 'mine' ? me : null, area_id: flt.area || null, who: meName() }); render(); } };
     $('#fa').onchange = e => { flt.area = e.target.value; render(); }; $('#ft').onchange = e => { flt.type = e.target.value; render(); };
@@ -69,7 +69,7 @@ function mine(ts) {
   bindRows();
 }
 const row = t => `<div class="op ${t.timer_started ? 'timer' : ''}" data-id="${t.id}" style="cursor:pointer"><div class="grow"><b class="${t.status === 'Done' ? 'done-t' : ''}">${esc(t.title)}</b> ${areaTag(t)}
-  <div class="sub">${t.job_ref ? esc(t.job_ref) + ' · ' : ''}${esc(t.status)} · ${dueTag(t)}${t.cl_total ? ` · ☑ ${t.cl_done}/${t.cl_total}` : ''}${t.est_min ? ` · ${hrs(t.actual_min)}/${hrs(t.est_min)}` : ''}</div>${t.status === 'Blocked' ? `<div class="blk">⛔ ${esc(t.blocked_reason || 'blocked')}</div>` : ''}</div>
+  <div class="sub">${esc(t.status)} · ${dueTag(t)}${t.cl_total ? ` · ☑ ${t.cl_done}/${t.cl_total}` : ''}${t.est_min ? ` · ${hrs(t.actual_min)}/${hrs(t.est_min)}` : ''}</div>${t.status === 'Blocked' ? `<div class="blk">⛔ ${esc(t.blocked_reason || 'blocked')}</div>` : ''}</div>
   ${t.status === 'Done' ? '' : t.timer_started ? `<span class="pill running">⏱ RUNNING</span><button data-act="stop">Pause</button>` : `<button data-act="start">▶ Start</button>`}${t.status === 'Done' ? '' : '<button class="ok" data-act="done">✔</button>'}</div>`;
 function bindRows() {
   $('#view').onclick = async e => {
@@ -101,8 +101,8 @@ function people(ts) {
 }
 
 function list(ts) {
-  $('#view').innerHTML = `<table><thead><tr><th>Task</th><th>Area</th><th>Job</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Due</th><th>Time</th></tr></thead><tbody>${ts.map(t => `
-    <tr class="click" data-id="${t.id}"><td>${esc(t.title)}</td><td>${areaTag(t)}</td><td>${esc(t.job_ref || '')}</td><td>${esc(t.assignee || '—')}</td><td>${t.status}</td><td><span class="pill ${t.priority}">${t.priority}</span></td><td>${dueTag(t)}</td><td>${hrs(t.actual_min)}/${hrs(t.est_min)}</td></tr>`).join('')}</tbody></table>`;
+  $('#view').innerHTML = `<table><thead><tr><th>Task</th><th>Area</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Due</th><th>Time</th></tr></thead><tbody>${ts.map(t => `
+    <tr class="click" data-id="${t.id}"><td>${esc(t.title)}</td><td>${areaTag(t)}</td><td>${esc(t.assignee || '—')}</td><td>${t.status}</td><td><span class="pill ${t.priority}">${t.priority}</span></td><td>${dueTag(t)}</td><td>${hrs(t.actual_min)}/${hrs(t.est_min)}</td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('tr.click').forEach(r => r.onclick = () => taskDetail(r.dataset.id));
 }
 
@@ -130,8 +130,7 @@ async function taskDetail(id) {
    <label>Assignee<select id="f-assignee_id"><option value="">Unassigned</option>${opt(meta.people, t.assignee_id, p => p.id, p => p.name)}</select></label>
    <label>Priority<select id="f-priority">${opt(meta.priorities, t.priority)}</select></label><label>Due<input id="f-due_date" type="date" value="${t.due_date || ''}"></label></div>
   <div class="row"><label>Area<select id="f-area_id"><option value="">—</option>${opt(meta.areas, t.area_id, a => a.id, a => a.name)}</select></label>
-   <label>Type<select id="f-type">${opt(meta.types, t.type)}</select></label><label>Job #<input id="f-job_ref" value="${esc(t.job_ref)}" placeholder="from ERP"></label>
-   <label>Part #<input id="f-part_ref" value="${esc(t.part_ref)}"></label><label>Est. minutes<input id="f-est_min" type="number" value="${t.est_min || ''}"></label>
+   <label>Type<select id="f-type">${opt(meta.types, t.type)}</select></label><label>Est. minutes<input id="f-est_min" type="number" value="${t.est_min || ''}"></label>
    <label>Repeats<select id="f-recurrence">${opt(['none', 'daily', 'weekly', 'monthly'], t.recurrence)}</select></label></div>
   ${t.status === 'Blocked' ? `<label>Blocked because<input id="f-blocked_reason" value="${esc(t.blocked_reason)}"></label>` : ''}
   <label style="margin-top:8px">Details / instructions<textarea id="f-description" rows="3">${esc(t.description)}</textarea></label>
@@ -144,7 +143,7 @@ async function taskDetail(id) {
   <div class="row" style="margin-top:14px"><button class="bad" id="del" style="flex:0;white-space:nowrap">Delete task</button></div>`;
   if (!dlg.open) dlg.showModal();
   const reopen = async () => { await render(); taskDetail(id); };
-  for (const f of ['title', 'status', 'assignee_id', 'priority', 'due_date', 'area_id', 'type', 'job_ref', 'part_ref', 'est_min', 'recurrence', 'blocked_reason', 'description']) {
+  for (const f of ['title', 'status', 'assignee_id', 'priority', 'due_date', 'area_id', 'type', 'est_min', 'recurrence', 'blocked_reason', 'description']) {
     const el = $('#f-' + f); if (!el) continue;
     el.onchange = async () => {
       const b = { [f]: el.value, who: meName() };
