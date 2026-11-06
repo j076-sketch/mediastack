@@ -2,152 +2,130 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { open, seed, STAGES } from './db.js';
+import { open, seed, STATUSES, TYPES } from './db.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const db = open();
-seed(db);
+const db = open(); seed(db);
 const PORT = process.env.PORT || 3000;
-const q = (sql, ...a) => db.prepare(sql).all(...a);
-const one = (sql, ...a) => db.prepare(sql).get(...a);
-const run = (sql, ...a) => db.prepare(sql).run(...a);
-
-const JOB_SQL = `SELECT j.*, c.name customer,
-  (SELECT COUNT(*) FROM ops WHERE job_id=j.id) ops_total,
-  (SELECT COUNT(*) FROM ops WHERE job_id=j.id AND status='done') ops_done,
-  (SELECT COALESCE(SUM(est_min),0) FROM ops WHERE job_id=j.id) est_min,
-  (SELECT COALESCE(SUM(actual_min),0) FROM ops WHERE job_id=j.id) actual_min
-  FROM jobs j LEFT JOIN customers c ON c.id=j.customer_id`;
-const OP_SQL = `SELECT o.*, w.name work_center, w.type wc_type FROM ops o LEFT JOIN work_centers w ON w.id=o.work_center_id`;
-
-const nextJobNo = () => 'J-' + (Number((one("SELECT MAX(CAST(SUBSTR(job_no,3) AS INTEGER)) m FROM jobs").m) || 1000) + 1);
-const customerId = name => { if (!name) return null; run('INSERT OR IGNORE INTO customers(name) VALUES(?)', name); return one('SELECT id FROM customers WHERE name=?', name).id; };
-const note = (job_id, body, who = 'system') => run('INSERT INTO comments(job_id,who,body) VALUES(?,?,?)', job_id, who, body);
+const q = (s, ...a) => db.prepare(s).all(...a);
+const one = (s, ...a) => db.prepare(s).get(...a);
+const run = (s, ...a) => db.prepare(s).run(...a);
 const now = () => new Date().toISOString();
+const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 
-function syncStage(jobId) {
-  const job = one('SELECT stage FROM jobs WHERE id=?', jobId);
-  const ops = q('SELECT status FROM ops WHERE job_id=?', jobId);
-  if (!ops.length || STAGES.indexOf(job.stage) >= STAGES.indexOf('QC')) return;
-  let next = job.stage;
-  if (ops.every(o => o.status === 'done')) next = 'QC';
-  else if (ops.some(o => o.status !== 'todo') && STAGES.indexOf(job.stage) < STAGES.indexOf('In Production')) next = 'In Production';
-  if (next !== job.stage) { run('UPDATE jobs SET stage=? WHERE id=?', next, jobId); note(jobId, `Auto-moved to ${next}`); }
+const TASK_SQL = `SELECT t.*, p.name assignee, a.name area, a.color area_color,
+  (SELECT COUNT(*) FROM checklist WHERE task_id=t.id) cl_total, (SELECT COUNT(*) FROM checklist WHERE task_id=t.id AND done=1) cl_done,
+  (SELECT started_at FROM time_entries WHERE task_id=t.id AND ended_at IS NULL LIMIT 1) timer_started
+  FROM tasks t LEFT JOIN people p ON p.id=t.assignee_id LEFT JOIN areas a ON a.id=t.area_id`;
+const getTask = id => one(TASK_SQL + ' WHERE t.id=?', id);
+const note = (id, body, who = 'system') => run('INSERT INTO comments(task_id,who,body) VALUES(?,?,?)', id, who, body);
+
+function stopTimers(id) {
+  for (const e of q('SELECT * FROM time_entries WHERE task_id=? AND ended_at IS NULL', id)) {
+    run('UPDATE time_entries SET ended_at=? WHERE id=?', now(), e.id);
+    run('UPDATE tasks SET actual_min=actual_min+? WHERE id=?', Math.round((Date.now() - Date.parse(e.started_at)) / 6e3) / 10, id);
+  }
+}
+function addDays(date, n) { const d = new Date((date || new Date().toISOString().slice(0, 10)) + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function spawnNext(t) {
+  const step = { daily: 1, weekly: 7, monthly: 30 }[t.recurrence]; if (!step) return;
+  const base = t.due_date && t.due_date > new Date().toISOString().slice(0, 10) ? t.due_date : new Date().toISOString().slice(0, 10);
+  const id = Number(run(`INSERT INTO tasks(title,description,area_id,assignee_id,priority,type,due_date,job_ref,part_ref,est_min,recurrence) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    t.title, t.description, t.area_id, t.assignee_id, t.priority, t.type, addDays(base, step), t.job_ref, t.part_ref, t.est_min, t.recurrence).lastInsertRowid);
+  for (const c of q('SELECT text FROM checklist WHERE task_id=?', t.id)) run('INSERT INTO checklist(task_id,text) VALUES(?,?)', id, c.text);
 }
 
-function stopTimers(opId, who) {
-  for (const t of q('SELECT * FROM time_entries WHERE op_id=? AND ended_at IS NULL', opId)) {
-    const mins = (Date.now() - Date.parse(t.started_at)) / 6e4;
-    run('UPDATE time_entries SET ended_at=? WHERE id=?', now(), t.id);
-    run('UPDATE ops SET actual_min=actual_min+? WHERE id=?', Math.round(mins * 10) / 10, opId);
+const FIELDS = ['title','description','area_id','assignee_id','status','priority','type','due_date','job_ref','part_ref','est_min','blocked_reason','recurrence'];
+function updateTask(id, b, who) {
+  const old = one('SELECT * FROM tasks WHERE id=?', id); if (!old) throw [404, 'no such task'];
+  if (b.status && !STATUSES.includes(b.status)) throw [400, 'bad status'];
+  if (b.priority && !PRIORITIES.includes(b.priority)) throw [400, 'bad priority'];
+  for (const k of FIELDS) if (k in b) run(`UPDATE tasks SET ${k}=? WHERE id=?`, b[k] === '' ? null : b[k], id);
+  if (b.status && b.status !== old.status) {
+    if (b.status !== 'In Progress') stopTimers(id);
+    if (b.status !== 'Blocked' && !('blocked_reason' in b)) run('UPDATE tasks SET blocked_reason=NULL WHERE id=?', id);
+    if (b.status === 'Done') { run('UPDATE tasks SET completed_at=? WHERE id=?', now(), id); if (old.recurrence !== 'none') spawnNext(old); }
+    else run('UPDATE tasks SET completed_at=NULL WHERE id=?', id);
+    note(id, `${old.status} → ${b.status}${b.blocked_reason ? ` (${b.blocked_reason})` : ''}`, who);
   }
+  if ('assignee_id' in b && b.assignee_id != old.assignee_id) note(id, `Assigned to ${one('SELECT name FROM people WHERE id=?', b.assignee_id)?.name || 'nobody'}`, who);
 }
 
 const routes = [];
 const on = (m, p, fn) => routes.push([m, new RegExp('^' + p.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn]);
 
-on('GET', '/api/meta', () => ({ stages: STAGES, work_centers: q('SELECT * FROM work_centers'), customers: q('SELECT * FROM customers ORDER BY name') }));
-on('GET', '/api/jobs', () => q(JOB_SQL + ' ORDER BY j.due_date'));
-on('POST', '/api/jobs', ({ body: b }) => {
-  const id = run('INSERT INTO jobs(job_no,customer_id,part_name,part_no,rev,qty,material,due_date,priority,stage,po,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-    nextJobNo(), customerId(b.customer), b.part_name, b.part_no || '', b.rev || 'A', b.qty || 1, b.material || '', b.due_date || null,
-    b.priority || 'normal', STAGES.includes(b.stage) ? b.stage : 'Quoted', b.po || '', b.notes || '').lastInsertRowid;
-  (b.ops || []).forEach((o, i) => run('INSERT INTO ops(job_id,seq,name,work_center_id,est_min) VALUES(?,?,?,?,?)', id, i + 1, o.name, o.work_center_id, o.est_min || 0));
-  return one(JOB_SQL + ' WHERE j.id=?', id);
-});
-on('GET', '/api/jobs/:id', ({ params: p }) => {
-  const job = one(JOB_SQL + ' WHERE j.id=?', p.id);
-  if (!job) throw [404, 'no such job'];
-  return { ...job, ops: q(OP_SQL + ' WHERE o.job_id=? ORDER BY o.seq', p.id), comments: q('SELECT * FROM comments WHERE job_id=? ORDER BY id DESC', p.id) };
-});
-on('PATCH', '/api/jobs/:id', ({ params: p, body: b }) => {
-  const old = one('SELECT * FROM jobs WHERE id=?', p.id); if (!old) throw [404, 'no such job'];
-  if (b.stage && !STAGES.includes(b.stage)) throw [400, 'bad stage'];
-  for (const k of ['part_name','part_no','rev','qty','material','due_date','priority','stage','po','notes'])
-    if (k in b) run(`UPDATE jobs SET ${k}=? WHERE id=?`, b[k], p.id);
-  if ('customer' in b) run('UPDATE jobs SET customer_id=? WHERE id=?', customerId(b.customer), p.id);
-  if (b.stage && b.stage !== old.stage) note(p.id, `Stage: ${old.stage} → ${b.stage}`, b.who);
-  return one(JOB_SQL + ' WHERE j.id=?', p.id);
-});
-on('DELETE', '/api/jobs/:id', ({ params: p }) => { run('DELETE FROM jobs WHERE id=?', p.id); return { ok: true }; });
-on('POST', '/api/jobs/:id/comments', ({ params: p, body: b }) => { if (!b.body) throw [400, 'empty']; note(p.id, b.body, b.who || 'me'); return { ok: true }; });
-on('POST', '/api/jobs/:id/ops', ({ params: p, body: b }) => {
-  const seq = (one('SELECT MAX(seq) m FROM ops WHERE job_id=?', p.id).m || 0) + 1;
-  run('INSERT INTO ops(job_id,seq,name,work_center_id,est_min) VALUES(?,?,?,?,?)', p.id, seq, b.name, b.work_center_id, b.est_min || 0);
-  return { ok: true };
-});
-on('PATCH', '/api/ops/:id', ({ params: p, body: b }) => {
-  for (const k of ['name','work_center_id','est_min','assignee','instructions']) if (k in b) run(`UPDATE ops SET ${k}=? WHERE id=?`, b[k], p.id);
-  return one(OP_SQL + ' WHERE o.id=?', p.id);
-});
-on('DELETE', '/api/ops/:id', ({ params: p }) => { run('DELETE FROM ops WHERE id=?', p.id); return { ok: true }; });
-on('POST', '/api/ops/:id/start', ({ params: p, body: b }) => {
-  const op = one('SELECT * FROM ops WHERE id=?', p.id); if (!op) throw [404, 'no such op'];
-  run('INSERT INTO time_entries(op_id,who,started_at) VALUES(?,?,?)', p.id, b.who || 'operator', now());
-  run("UPDATE ops SET status='running', assignee=COALESCE(?,assignee) WHERE id=?", b.who || null, p.id);
-  syncStage(op.job_id); return { ok: true };
-});
-on('POST', '/api/ops/:id/stop', ({ params: p }) => { stopTimers(p.id); run("UPDATE ops SET status='todo' WHERE id=? AND status='running'", p.id); return { ok: true }; });
-on('POST', '/api/ops/:id/done', ({ params: p, body: b }) => {
-  const op = one('SELECT * FROM ops WHERE id=?', p.id); if (!op) throw [404, 'no such op'];
-  stopTimers(p.id); run("UPDATE ops SET status='done' WHERE id=?", p.id);
-  note(op.job_id, `Completed: ${op.name}`, b.who || 'operator'); syncStage(op.job_id); return { ok: true };
-});
-on('POST', '/api/ops/:id/reopen', ({ params: p }) => { run("UPDATE ops SET status='todo' WHERE id=?", p.id); return { ok: true }; });
+on('GET', '/api/meta', () => ({ statuses: STATUSES, types: TYPES, priorities: PRIORITIES, people: q('SELECT * FROM people WHERE active=1 ORDER BY name'), areas: q('SELECT * FROM areas ORDER BY id') }));
+on('POST', '/api/people', ({ body: b }) => ({ id: Number(run('INSERT INTO people(name,role) VALUES(?,?)', b.name, b.role || '').lastInsertRowid) }));
+on('DELETE', '/api/people/:id', ({ params: p }) => { run('UPDATE people SET active=0 WHERE id=?', p.id); run('UPDATE tasks SET assignee_id=NULL WHERE assignee_id=? AND status!=\'Done\'', p.id); return { ok: true }; });
+on('POST', '/api/areas', ({ body: b }) => ({ id: Number(run('INSERT INTO areas(name,color) VALUES(?,?)', b.name, b.color || '#4c6ef5').lastInsertRowid) }));
 
-// Shop floor: open ops per work center, in job-due order, only ops whose predecessors are done are "ready"
-on('GET', '/api/queue', () => {
-  const rows = q(OP_SQL + ` LEFT JOIN jobs j ON j.id=o.job_id WHERE o.status!='done' ORDER BY j.due_date, o.seq`);
-  const meta = q(`SELECT j.id, j.job_no, j.part_name, j.qty, j.due_date, j.priority, j.stage, c.name customer FROM jobs j LEFT JOIN customers c ON c.id=j.customer_id`);
-  const byJob = Object.fromEntries(meta.map(m => [m.id, m]));
-  return rows.map(o => ({ ...o, job: byJob[o.job_id],
-    ready: !one("SELECT 1 x FROM ops WHERE job_id=? AND seq<? AND status!='done'", o.job_id, o.seq) }));
+on('GET', '/api/tasks', () => q(TASK_SQL + ` WHERE t.status!='Done' OR t.completed_at > datetime('now','-7 day') ORDER BY t.due_date IS NULL, t.due_date, t.id`));
+on('POST', '/api/tasks', ({ body: b }) => {
+  if (!b.title?.trim()) throw [400, 'title required'];
+  const id = Number(run('INSERT INTO tasks(title) VALUES(?)', b.title.trim()).lastInsertRowid);
+  updateTask(id, { ...b, title: b.title.trim(), status: b.status || 'To Do' }, b.who);
+  for (const c of b.checklist || []) run('INSERT INTO checklist(task_id,text) VALUES(?,?)', id, c);
+  return getTask(id);
 });
+on('GET', '/api/tasks/:id', ({ params: p }) => {
+  const t = getTask(p.id); if (!t) throw [404, 'no such task'];
+  return { ...t, checklist: q('SELECT * FROM checklist WHERE task_id=? ORDER BY id', p.id), comments: q('SELECT * FROM comments WHERE task_id=? ORDER BY id DESC', p.id) };
+});
+on('PATCH', '/api/tasks/:id', ({ params: p, body: b }) => { updateTask(p.id, b, b.who); return getTask(p.id); });
+on('DELETE', '/api/tasks/:id', ({ params: p }) => { run('DELETE FROM tasks WHERE id=?', p.id); return { ok: true }; });
+on('POST', '/api/tasks/:id/comments', ({ params: p, body: b }) => { if (!b.body) throw [400, 'empty']; note(p.id, b.body, b.who || 'me'); return { ok: true }; });
+on('POST', '/api/tasks/:id/checklist', ({ params: p, body: b }) => { run('INSERT INTO checklist(task_id,text) VALUES(?,?)', p.id, b.text); return { ok: true }; });
+on('PATCH', '/api/checklist/:id', ({ params: p, body: b }) => { run('UPDATE checklist SET done=? WHERE id=?', b.done ? 1 : 0, p.id); return { ok: true }; });
+on('DELETE', '/api/checklist/:id', ({ params: p }) => { run('DELETE FROM checklist WHERE id=?', p.id); return { ok: true }; });
+
+// Timer: starting moves task to In Progress; one running timer per person.
+on('POST', '/api/tasks/:id/timer/start', ({ params: p, body: b }) => {
+  if (b.person_id) for (const e of q('SELECT task_id FROM time_entries WHERE person_id=? AND ended_at IS NULL', b.person_id)) stopTimers(e.task_id);
+  stopTimers(p.id);
+  run('INSERT INTO time_entries(task_id,person_id,started_at) VALUES(?,?,?)', p.id, b.person_id || null, now());
+  const t = one('SELECT status, assignee_id FROM tasks WHERE id=?', p.id);
+  if (t.status !== 'In Progress') updateTask(p.id, { status: 'In Progress', ...(t.assignee_id || !b.person_id ? {} : { assignee_id: b.person_id }) }, b.who);
+  return getTask(p.id);
+});
+on('POST', '/api/tasks/:id/timer/stop', ({ params: p }) => { stopTimers(p.id); return getTask(p.id); });
 
 on('GET', '/api/dashboard', () => {
   const today = new Date().toISOString().slice(0, 10);
-  const loads = q(`SELECT w.id, w.name, w.type, w.hours_per_day,
-      COALESCE(SUM(CASE WHEN o.status!='done' THEN MAX(o.est_min-o.actual_min,0) END),0) remaining_min
-      FROM work_centers w LEFT JOIN ops o ON o.work_center_id=w.id GROUP BY w.id`)
-    .map(w => ({ ...w, days_backlog: Math.round(w.remaining_min / (w.hours_per_day * 60) * 10) / 10 }));
+  const open = "status!='Done'";
   return {
-    open_jobs: one("SELECT COUNT(*) c FROM jobs WHERE stage!='Shipped'").c,
-    late: q(JOB_SQL + " WHERE j.stage NOT IN ('Shipped','Ready to Ship') AND j.due_date<? ORDER BY j.due_date", today),
-    due_week: one("SELECT COUNT(*) c FROM jobs WHERE stage!='Shipped' AND due_date BETWEEN ? AND date(?, '+7 day')", today, today).c,
-    loads,
-    running: q(`SELECT o.*, w.name work_center, j.job_no, j.part_name FROM ops o LEFT JOIN work_centers w ON w.id=o.work_center_id JOIN jobs j ON j.id=o.job_id WHERE o.status='running'`),
-    low_stock: q('SELECT * FROM materials WHERE stock<=reorder_at'),
+    open: one(`SELECT COUNT(*) c FROM tasks WHERE ${open}`).c,
+    unassigned: q(TASK_SQL + ` WHERE t.assignee_id IS NULL AND t.${open} ORDER BY t.due_date IS NULL, t.due_date`),
+    overdue: q(TASK_SQL + ` WHERE t.due_date<? AND t.${open} ORDER BY t.due_date`, today),
+    blocked: q(TASK_SQL + " WHERE t.status='Blocked'"),
+    running: q(TASK_SQL + ' WHERE t.id IN (SELECT task_id FROM time_entries WHERE ended_at IS NULL)'),
+    workload: q(`SELECT p.id, p.name, p.role,
+      SUM(CASE WHEN t.status!='Done' THEN 1 ELSE 0 END) open,
+      COALESCE(SUM(CASE WHEN t.status!='Done' THEN MAX(t.est_min-t.actual_min,0) END),0) remaining_min,
+      SUM(CASE WHEN t.status='Done' AND t.completed_at>datetime('now','-7 day') THEN 1 ELSE 0 END) done_week,
+      SUM(CASE WHEN t.status!='Done' AND t.due_date<? THEN 1 ELSE 0 END) overdue
+      FROM people p LEFT JOIN tasks t ON t.assignee_id=p.id WHERE p.active=1 GROUP BY p.id ORDER BY p.name`, today),
   };
 });
 
-on('GET', '/api/materials', () => q('SELECT * FROM materials ORDER BY name'));
-on('POST', '/api/materials', ({ body: b }) => { run('INSERT INTO materials(name,spec,stock,reorder_at,unit,supplier) VALUES(?,?,?,?,?,?)', b.name, b.spec || '', b.stock || 0, b.reorder_at || 0, b.unit || 'sheets', b.supplier || ''); return { ok: true }; });
-on('PATCH', '/api/materials/:id', ({ params: p, body: b }) => {
-  for (const k of ['name','spec','stock','reorder_at','unit','supplier']) if (k in b) run(`UPDATE materials SET ${k}=? WHERE id=?`, b[k], p.id);
-  return { ok: true };
-});
-on('DELETE', '/api/materials/:id', ({ params: p }) => { run('DELETE FROM materials WHERE id=?', p.id); return { ok: true }; });
-
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   const send = (code, data, type = 'application/json') => { res.writeHead(code, { 'Content-Type': type }); res.end(type === 'application/json' ? JSON.stringify(data) : data); };
   try {
     if (url.pathname.startsWith('/api/')) {
       for (const [m, re, fn] of routes) {
-        const hit = m === req.method && re.exec(url.pathname);
-        if (!hit) continue;
+        const hit = m === req.method && re.exec(url.pathname); if (!hit) continue;
         let raw = ''; for await (const c of req) raw += c;
         return send(200, fn({ params: hit.groups || {}, body: raw ? JSON.parse(raw) : {} }) ?? {});
       }
       return send(404, { error: 'not found' });
     }
-    const file = path.join(root, 'public', url.pathname === '/' ? 'index.html' : path.normalize(url.pathname).replace(/^(\.\.[/\\])+/, ''));
-    if (!file.startsWith(path.join(root, 'public')) || !fs.existsSync(file)) return send(404, 'not found', 'text/plain');
+    const pub = path.join(root, 'public');
+    const file = path.join(pub, url.pathname === '/' ? 'index.html' : url.pathname);
+    if (!file.startsWith(pub + path.sep) || !fs.existsSync(file)) return send(404, 'not found', 'text/plain');
     send(200, fs.readFileSync(file), MIME[path.extname(file)] || 'application/octet-stream');
   } catch (e) {
     if (Array.isArray(e)) return send(e[0], { error: e[1] });
     console.error(e); send(500, { error: e.message });
   }
-}).listen(PORT, () => console.log(`Job shop app on http://localhost:${PORT}`));
+}).listen(PORT, () => console.log(`JobShop on http://localhost:${PORT}`));

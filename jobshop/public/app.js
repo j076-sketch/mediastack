@@ -2,141 +2,164 @@ const $ = (s, r = document) => r.querySelector(s);
 const api = async (m, u, b) => { const r = await fetch('/api' + u, { method: m, headers: { 'Content-Type': 'application/json' }, body: b ? JSON.stringify(b) : undefined }); if (!r.ok) throw new Error((await r.json()).error); return r.json(); };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const today = () => new Date().toISOString().slice(0, 10);
-const hrs = m => (m / 60).toFixed(1) + 'h';
-const user = () => localStorage.getItem('who') || (localStorage.setItem('who', prompt('Your name (for time tracking & notes)?') || 'operator'), localStorage.getItem('who'));
-let meta, view = location.hash.slice(1) || 'board';
-const VIEWS = { dashboard: 'Dashboard', board: 'Job Board', jobs: 'All Jobs', floor: 'Shop Floor', schedule: 'Work Center Load', materials: 'Materials' };
+const hrs = m => m ? (m / 60).toFixed(1) + 'h' : '—';
+const ini = n => (n || '?').slice(0, 1).toUpperCase();
+const VIEWS = { mine: 'My Tasks', board: 'Board', people: 'By Person', list: 'All Tasks', dash: 'Dashboard' };
+let meta, view = location.hash.slice(1) || 'mine', me = Number(localStorage.getItem('me')) || null;
+let flt = { area: '', type: '', q: '' };
+const dlg = $('#dlg'); window.dlg = dlg;
+const meName = () => meta.people.find(p => p.id === me)?.name || 'someone';
 
 $('#nav').innerHTML = Object.entries(VIEWS).map(([k, v]) => `<a data-v="${k}">${v}</a>`).join('');
-$('#nav').onclick = e => { if (e.target.dataset.v) go(e.target.dataset.v); };
-$('#newJob').onclick = () => jobForm();
-function go(v) { view = v; location.hash = v; render(); }
+$('#nav').onclick = e => { if (e.target.dataset.v) { view = location.hash = e.target.dataset.v; } };
+window.onhashchange = () => { view = location.hash.slice(1) || 'mine'; render(); };
 
-async function render() {
-  meta ||= await api('GET', '/meta');
-  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
-  const fn = { dashboard, board, jobs, floor, schedule: dashboardLoad, materials }[view] || board;
-  await fn();
+async function loadMeta() {
+  meta = await api('GET', '/meta');
+  if (!meta.people.some(p => p.id === me)) me = meta.people[0]?.id;
+  $('#me').innerHTML = meta.people.map(p => `<option value="${p.id}" ${p.id === me ? 'selected' : ''}>${esc(p.name)}</option>`).join('') + '<option value="new">+ add person…</option>';
 }
+$('#me').onchange = async e => {
+  if (e.target.value === 'new') { const name = prompt('Name?'); if (name) { const r = await api('POST', '/people', { name, role: prompt('Role?') || '' }); me = r.id; } }
+  else me = Number(e.target.value);
+  localStorage.setItem('me', me); await loadMeta(); render();
+};
 
-const dueTag = j => !j.due_date ? '' : (j.due_date < today() && !['Ready to Ship', 'Shipped'].includes(j.stage)) ? `<span class="late">Due ${j.due_date} · LATE</span>` : `<span class="sub">Due ${j.due_date}</span>`;
-const prog = j => `<div class="bar"><i style="width:${j.ops_total ? j.ops_done / j.ops_total * 100 : 0}%"></i></div>`;
+const dueTag = t => !t.due_date ? '' : (t.due_date < today() && t.status !== 'Done') ? `<span class="late">${t.due_date} · overdue</span>` : t.due_date === today() ? `<b>Today</b>` : `<span class="sub">${t.due_date}</span>`;
+const areaTag = t => t.area ? `<span class="tag" style="background:${t.area_color}">${esc(t.area)}</span>` : '';
+const card = t => `<div class="card ${t.priority} ${t.timer_started ? 'timer' : ''}" draggable="true" data-id="${t.id}">
+  <b>${esc(t.title)}</b><div class="chips">${areaTag(t)}${t.job_ref ? `<span class="pill">${esc(t.job_ref)}</span>` : ''}${t.type !== 'Production' ? `<span class="pill">${esc(t.type)}</span>` : ''}${t.recurrence !== 'none' ? '<span class="pill">↻ ' + t.recurrence + '</span>' : ''}${t.priority === 'urgent' ? '<span class="pill urgent">URGENT</span>' : ''}</div>
+  ${t.status === 'Blocked' && t.blocked_reason ? `<div class="blk">⛔ ${esc(t.blocked_reason)}</div>` : ''}
+  <div class="sub" style="display:flex;justify-content:space-between;margin-top:6px"><span>${dueTag(t)} ${t.cl_total ? `· ☑ ${t.cl_done}/${t.cl_total}` : ''}${t.est_min ? ` · ${hrs(t.actual_min)}/${hrs(t.est_min)}` : ''}</span>${t.assignee ? `<span class="who" title="${esc(t.assignee)}">${ini(t.assignee)}</span>` : '<span class="pill">unassigned</span>'}</div></div>`;
 
-async function board() {
-  const jobs = await api('GET', '/jobs');
-  $('#view').innerHTML = `<h2>Job Board</h2><div class="board">${meta.stages.map(s => {
-    const js = jobs.filter(j => j.stage === s);
-    return `<div class="col" data-stage="${s}"><h3>${s}<span>${js.length}</span></h3>${js.map(j => `
-      <div class="card ${j.priority}" draggable="true" data-id="${j.id}">
-        <b>${esc(j.job_no)} · ${esc(j.part_name)}</b><span class="sub">${esc(j.customer || '')} · qty ${j.qty}</span><br>${dueTag(j)}${prog(j)}</div>`).join('')}</div>`;
-  }).join('')}</div>`;
-  document.querySelectorAll('.card').forEach(c => {
-    c.onclick = () => jobDetail(c.dataset.id);
-    c.ondragstart = e => e.dataTransfer.setData('id', c.dataset.id);
-  });
-  document.querySelectorAll('.col').forEach(col => {
+function bindCards(root, onDrop, colSel) {
+  root.querySelectorAll('.card').forEach(c => { c.onclick = () => taskDetail(c.dataset.id); c.ondragstart = e => e.dataTransfer.setData('id', c.dataset.id); });
+  root.querySelectorAll(colSel).forEach(col => {
     col.ondragover = e => { e.preventDefault(); col.classList.add('over'); };
     col.ondragleave = () => col.classList.remove('over');
-    col.ondrop = async e => { e.preventDefault(); await api('PATCH', `/jobs/${e.dataTransfer.getData('id')}`, { stage: col.dataset.stage, who: user() }); render(); };
+    col.ondrop = async e => { e.preventDefault(); await onDrop(e.dataTransfer.getData('id'), col); render(); };
   });
 }
 
-async function jobs() {
-  const js = await api('GET', '/jobs');
-  $('#view').innerHTML = `<h2>All Jobs</h2><div class="toolbar"><input id="f" placeholder="Filter by job #, part, customer, PO…" style="width:320px"></div>
-  <table><thead><tr><th>Job</th><th>Part</th><th>Customer</th><th>Qty</th><th>Stage</th><th>Due</th><th>Ops</th><th>Est / Actual</th></tr></thead><tbody id="tb"></tbody></table>`;
-  const draw = () => { const f = $('#f').value.toLowerCase(); $('#tb').innerHTML = js.filter(j => !f || [j.job_no, j.part_name, j.customer, j.po, j.part_no].join(' ').toLowerCase().includes(f)).map(j => `
-    <tr class="click" data-id="${j.id}"><td>${esc(j.job_no)}</td><td>${esc(j.part_name)}<div class="sub">${esc(j.part_no)} rev ${esc(j.rev)}</div></td><td>${esc(j.customer || '')}</td><td>${j.qty}</td>
-    <td><span class="pill ${j.priority}">${j.stage}</span></td><td>${dueTag(j)}</td><td>${j.ops_done}/${j.ops_total}</td><td>${hrs(j.est_min)} / ${hrs(j.actual_min)}</td></tr>`).join('');
-    document.querySelectorAll('#tb tr').forEach(r => r.onclick = () => jobDetail(r.dataset.id)); };
-  $('#f').oninput = draw; draw();
+async function render() {
+  if (!meta) await loadMeta();
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.v === view));
+  const tasks = await api('GET', '/tasks');
+  const shown = tasks.filter(t => (!flt.area || t.area_id == flt.area) && (!flt.type || t.type === flt.type)
+    && (!flt.q || [t.title, t.job_ref, t.part_ref, t.assignee].join(' ').toLowerCase().includes(flt.q.toLowerCase())));
+  $('#top').innerHTML = view === 'dash' ? '' : `<div class="quick"><input id="qa" placeholder="Add a task and press Enter…  (assigned to you in My Tasks)"></div>
+    <div class="filters"><select id="fa"><option value="">All areas</option>${meta.areas.map(a => `<option value="${a.id}" ${flt.area == a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+    <select id="ft"><option value="">All types</option>${meta.types.map(t => `<option ${flt.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <input id="fq" placeholder="Search title / job # / person" value="${esc(flt.q)}"></div>`;
+  if (view !== 'dash') {
+    $('#qa').onkeydown = async e => { if (e.key === 'Enter' && e.target.value.trim()) { await api('POST', '/tasks', { title: e.target.value, assignee_id: view === 'mine' ? me : null, area_id: flt.area || null, who: meName() }); render(); } };
+    $('#fa').onchange = e => { flt.area = e.target.value; render(); }; $('#ft').onchange = e => { flt.type = e.target.value; render(); };
+    $('#fq').onchange = e => { flt.q = e.target.value; render(); };
+  }
+  ({ mine, board, people, list, dash }[view] || mine)(shown);
 }
 
-async function floor() {
-  const ops = await api('GET', '/queue');
-  const groups = meta.work_centers.map(w => ({ w, ops: ops.filter(o => o.work_center_id === w.id) })).filter(g => g.ops.length);
-  $('#view').innerHTML = `<h2>Shop Floor</h2><p class="sub">Queue per machine, by due date. Greyed = waiting on an earlier operation.</p>` + groups.map(g => `
-    <div class="wc"><h3>${esc(g.w.name)} <span class="sub">${g.ops.length} op(s)</span></h3>${g.ops.map(o => `
-      <div class="op ${o.ready ? '' : 'notready'}"><div class="grow"><b>${esc(o.job.job_no)}</b> · ${esc(o.name)} — ${esc(o.job.part_name)} ×${o.job.qty}
-        <div class="sub">${esc(o.job.customer || '')} · ${dueTag(o.job)} · est ${hrs(o.est_min)} · logged ${hrs(o.actual_min)}${o.assignee ? ' · ' + esc(o.assignee) : ''}</div></div>
-        ${o.status === 'running' ? `<span class="pill running">RUNNING</span><button data-a="stop" data-id="${o.id}">Pause</button>` : `<button data-a="start" data-id="${o.id}" ${o.ready ? '' : 'disabled'}>▶ Start</button>`}
-        <button class="ok" data-a="done" data-id="${o.id}" ${o.ready ? '' : 'disabled'}>✔ Done</button></div>`).join('')}</div>`).join('');
-  $('#view').onclick = async e => { const b = e.target.closest('button[data-a]'); if (!b) return; await api('POST', `/ops/${b.dataset.id}/${b.dataset.a}`, { who: user() }); render(); };
+function mine(ts) {
+  const mineT = ts.filter(t => t.assignee_id === me), open = mineT.filter(t => t.status !== 'Done');
+  const grp = [['Overdue', t => t.due_date && t.due_date < today()], ['Today', t => t.due_date === today()], ['Upcoming', t => t.due_date > today()], ['No date', t => !t.due_date]];
+  const seen = new Set();
+  $('#view').innerHTML = `<h2>My Tasks — ${esc(meName())}</h2>` + grp.map(([n, f]) => { const l = open.filter(t => !seen.has(t.id) && f(t)); l.forEach(t => seen.add(t.id)); return l.length ? `<h3>${n} (${l.length})</h3>${l.map(row).join('')}` : ''; }).join('') || '';
+  if (!open.length) $('#view').innerHTML += '<p class="sub">Nothing assigned. Ask the supervisor, or grab something from the Board.</p>';
+  const done = mineT.filter(t => t.status === 'Done'); if (done.length) $('#view').innerHTML += `<h3>Done this week (${done.length})</h3>` + done.map(row).join('');
+  bindRows();
 }
-
-async function dashboard() {
-  const d = await api('GET', '/dashboard');
-  $('#view').innerHTML = `<h2>Dashboard</h2><div class="grid">
-    <div class="tile"><div class="sub">Open jobs</div><div class="big">${d.open_jobs}</div></div>
-    <div class="tile"><div class="sub">Due next 7 days</div><div class="big">${d.due_week}</div></div>
-    <div class="tile"><div class="sub">Late</div><div class="big ${d.late.length ? 'late' : ''}">${d.late.length}</div>${d.late.map(j => `<div class="sub">${esc(j.job_no)} ${esc(j.part_name)} (${j.due_date})</div>`).join('')}</div>
-    <div class="tile"><div class="sub">Running right now</div>${d.running.map(o => `<div><b>${esc(o.work_center)}</b> <span class="sub">${esc(o.job_no)} ${esc(o.name)} · ${esc(o.assignee || '')}</span></div>`).join('') || '<div class="sub">Nothing running</div>'}</div>
-    <div class="tile"><div class="sub">Low stock</div>${d.low_stock.map(m => `<div>${esc(m.name)} <span class="sub">${esc(m.spec)} — ${m.stock} ${m.unit}</span></div>`).join('') || '<div class="sub">All good</div>'}</div></div>`;
-}
-
-async function dashboardLoad() {
-  const d = await api('GET', '/dashboard'); const max = Math.max(5, ...d.loads.map(l => l.days_backlog));
-  $('#view').innerHTML = `<h2>Work Center Load</h2><p class="sub">Remaining estimated hours ÷ daily capacity. Find the bottleneck before the customer does.</p><table><thead><tr><th>Work center</th><th>Remaining</th><th>Backlog (days)</th><th style="width:40%"></th></tr></thead><tbody>${d.loads.map(l => `
-    <tr><td>${esc(l.name)}</td><td>${hrs(l.remaining_min)}</td><td class="${l.days_backlog > 3 ? 'late' : ''}">${l.days_backlog}</td><td><div class="bar" style="height:10px"><i style="width:${l.days_backlog / max * 100}%;background:${l.days_backlog > 3 ? 'var(--bad)' : 'var(--acc)'}"></i></div></td></tr>`).join('')}</tbody></table>`;
-}
-
-async function materials() {
-  const ms = await api('GET', '/materials');
-  $('#view').innerHTML = `<h2>Materials</h2><div class="toolbar"><button id="addm" class="primary">+ Add material</button></div><table><thead><tr><th>Material</th><th>Spec</th><th>Stock</th><th>Reorder at</th><th>Supplier</th><th></th></tr></thead><tbody>${ms.map(m => `
-    <tr><td>${esc(m.name)}</td><td>${esc(m.spec)}</td><td class="${m.stock <= m.reorder_at ? 'late' : ''}"><input type="number" value="${m.stock}" data-id="${m.id}" style="width:80px"> ${esc(m.unit)}</td><td>${m.reorder_at}</td><td>${esc(m.supplier)}</td><td><button class="bad" data-del="${m.id}">✕</button></td></tr>`).join('')}</tbody></table>`;
-  document.querySelectorAll('input[data-id]').forEach(i => i.onchange = async () => { await api('PATCH', `/materials/${i.dataset.id}`, { stock: Number(i.value) }); render(); });
-  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (confirm('Delete?')) { await api('DELETE', `/materials/${b.dataset.del}`); render(); } });
-  $('#addm').onclick = async () => { const name = prompt('Material name?'); if (!name) return; await api('POST', '/materials', { name, spec: prompt('Spec (gauge/size)?') || '', stock: Number(prompt('Stock on hand?') || 0), reorder_at: Number(prompt('Reorder at?') || 0) }); render(); };
-}
-
-const dlg = $('#dlg');
-const wcOpts = sel => meta.work_centers.map(w => `<option value="${w.id}" ${w.id == sel ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
-const TEMPLATES = { 'Sheet metal': [['Laser cut', 'laser'], ['Form', 'brake'], ['Weld', 'weld'], ['Deburr / finish', 'finish'], ['Inspect', 'qc'], ['Ship', 'ship']],
-  'CNC machined': [['Mill op 1', 'cnc-mill'], ['Mill op 2', 'cnc-mill'], ['Deburr', 'finish'], ['Inspect', 'qc'], ['Ship', 'ship']],
-  'Turned part': [['Turn', 'cnc-lathe'], ['Mill features', 'cnc-mill'], ['Deburr', 'finish'], ['Inspect', 'qc'], ['Ship', 'ship']] };
-
-function jobForm() {
-  dlg.innerHTML = `<h2>New Job</h2><form id="jf"><div class="row">
-    <label>Part name<input name="part_name" required></label><label>Part # / Rev<input name="part_no"></label></div><div class="row">
-    <label>Customer<input name="customer" list="cl"><datalist id="cl">${meta.customers.map(c => `<option value="${esc(c.name)}">`).join('')}</datalist></label>
-    <label>PO #<input name="po"></label><label>Qty<input name="qty" type="number" value="1" min="1"></label></div><div class="row">
-    <label>Material<input name="material" placeholder='5052 Al .063" / 6061 bar'></label><label>Due<input name="due_date" type="date"></label>
-    <label>Priority<select name="priority"><option>low</option><option selected>normal</option><option>high</option><option>urgent</option></select></label></div>
-    <label>Routing template<select name="tpl"><option value="">— none —</option>${Object.keys(TEMPLATES).map(t => `<option>${t}</option>`).join('')}</select></label>
-    <div class="row"><button class="primary">Create job</button><button type="button" onclick="dlg.close()">Cancel</button></div></form>`;
-  window.dlg = dlg; dlg.showModal();
-  $('#jf').onsubmit = async e => {
-    e.preventDefault(); const f = Object.fromEntries(new FormData(e.target)); f.qty = Number(f.qty);
-    f.ops = (TEMPLATES[f.tpl] || []).map(([name, type]) => ({ name, work_center_id: meta.work_centers.find(w => w.type === type)?.id, est_min: 60 }));
-    const j = await api('POST', '/jobs', f); dlg.close(); await render(); jobDetail(j.id);
+const row = t => `<div class="op ${t.timer_started ? 'timer' : ''}" data-id="${t.id}" style="cursor:pointer"><div class="grow"><b class="${t.status === 'Done' ? 'done-t' : ''}">${esc(t.title)}</b> ${areaTag(t)}
+  <div class="sub">${t.job_ref ? esc(t.job_ref) + ' · ' : ''}${esc(t.status)} · ${dueTag(t)}${t.cl_total ? ` · ☑ ${t.cl_done}/${t.cl_total}` : ''}${t.est_min ? ` · ${hrs(t.actual_min)}/${hrs(t.est_min)}` : ''}</div>${t.status === 'Blocked' ? `<div class="blk">⛔ ${esc(t.blocked_reason || 'blocked')}</div>` : ''}</div>
+  ${t.status === 'Done' ? '' : t.timer_started ? `<span class="pill running">⏱ RUNNING</span><button data-act="stop">Pause</button>` : `<button data-act="start">▶ Start</button>`}${t.status === 'Done' ? '' : '<button class="ok" data-act="done">✔</button>'}</div>`;
+function bindRows() {
+  $('#view').onclick = async e => {
+    const r = e.target.closest('.op'); if (!r) return; const b = e.target.closest('button[data-act]'), id = r.dataset.id;
+    if (!b) return taskDetail(id);
+    if (b.dataset.act === 'start') await api('POST', `/tasks/${id}/timer/start`, { person_id: me, who: meName() });
+    if (b.dataset.act === 'stop') await api('POST', `/tasks/${id}/timer/stop`, {});
+    if (b.dataset.act === 'done') await api('PATCH', `/tasks/${id}`, { status: 'Done', who: meName() });
+    render();
   };
 }
 
-async function jobDetail(id) {
-  const j = await api('GET', `/jobs/${id}`); window.dlg = dlg;
-  dlg.innerHTML = `<div style="display:flex;justify-content:space-between"><h2>${esc(j.job_no)} · ${esc(j.part_name)}</h2><button onclick="dlg.close()">✕</button></div>
-  <div class="row"><label>Stage<select id="st">${meta.stages.map(s => `<option ${s === j.stage ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
-   <label>Priority<select id="pr">${['low', 'normal', 'high', 'urgent'].map(p => `<option ${p === j.priority ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
-   <label>Due<input id="du" type="date" value="${j.due_date || ''}"></label></div>
-  <div class="sub">${esc(j.customer || '—')} · PO ${esc(j.po || '—')} · ${esc(j.part_no)} rev ${esc(j.rev)} · qty ${j.qty} · ${esc(j.material)}</div>
-  <label style="margin-top:8px">Notes<textarea id="nt" rows="2">${esc(j.notes)}</textarea></label>
-  <h3>Routing <span class="sub">${hrs(j.est_min)} est / ${hrs(j.actual_min)} actual</span></h3>
-  ${j.ops.map(o => `<div class="op"><span class="sub">${o.seq}</span><div class="grow"><b>${esc(o.name)}</b> <span class="sub">${esc(o.work_center || '—')} · est ${hrs(o.est_min)} · actual ${hrs(o.actual_min)}</span></div>
-    <span class="pill ${o.status}">${o.status}</span>${o.status === 'done' ? `<button data-op="${o.id}" data-a="reopen">Reopen</button>` : `<button class="ok" data-op="${o.id}" data-a="done">Done</button>`}<button class="bad" data-op="${o.id}" data-a="del">✕</button></div>`).join('') || '<p class="sub">No operations yet.</p>'}
-  <form id="of" class="row"><input name="name" placeholder="Add operation…" required><select name="wc">${wcOpts()}</select><input name="est" type="number" placeholder="est min" style="max-width:100px"><button>Add</button></form>
-  <h3>Activity</h3><form id="cf" class="row"><input name="body" placeholder="Comment…" required><button>Post</button></form>
-  ${j.comments.map(c => `<div class="cmt"><b>${esc(c.who)}</b> <span class="sub">${esc(c.created_at)}</span><div>${esc(c.body)}</div></div>`).join('')}
-  <div class="row" style="margin-top:14px"><button class="bad" id="dj" style="flex:0">Delete job</button></div>`;
-  dlg.showModal();
-  const save = async () => { await api('PATCH', `/jobs/${id}`, { stage: $('#st').value, priority: $('#pr').value, due_date: $('#du').value || null, notes: $('#nt').value, who: user() }); };
-  ['#st', '#pr', '#du', '#nt'].forEach(s => $(s).onchange = async () => { await save(); await render(); jobDetail(id); });
-  dlg.onclick = async e => { const b = e.target.closest('[data-op]'); if (!b) return; const a = b.dataset.a;
-    if (a === 'del') { if (!confirm('Delete operation?')) return; await api('DELETE', `/ops/${b.dataset.op}`); } else await api('POST', `/ops/${b.dataset.op}/${a}`, { who: user() });
-    await render(); jobDetail(id); };
-  $('#of').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target); await api('POST', `/jobs/${id}/ops`, { name: f.get('name'), work_center_id: Number(f.get('wc')), est_min: Number(f.get('est') || 0) }); jobDetail(id); };
-  $('#cf').onsubmit = async e => { e.preventDefault(); await api('POST', `/jobs/${id}/comments`, { body: new FormData(e.target).get('body'), who: user() }); jobDetail(id); };
-  $('#dj').onclick = async () => { if (confirm('Delete this job?')) { await api('DELETE', `/jobs/${id}`); dlg.close(); render(); } };
+function board(ts) {
+  $('#view').innerHTML = `<div class="board">${meta.statuses.map(s => { const l = ts.filter(t => t.status === s);
+    return `<div class="col" data-s="${s}"><h3>${s}<span>${l.length}</span></h3>${l.map(card).join('')}</div>`; }).join('')}</div>`;
+  bindCards($('#view'), async (id, col) => {
+    const status = col.dataset.s; let blocked_reason;
+    if (status === 'Blocked') { blocked_reason = prompt('Why is it blocked? (material, program, machine down…)') || 'Blocked'; }
+    await api('PATCH', `/tasks/${id}`, { status, blocked_reason, who: meName() });
+  }, '.col');
 }
 
-window.onhashchange = () => { view = location.hash.slice(1) || 'board'; render(); };
+function people(ts) {
+  const cols = [{ id: '', name: 'Unassigned' }, ...meta.people];
+  $('#view').innerHTML = `<h2>Assign Work</h2><p class="sub">Drag a task onto a person to assign it.</p><div class="board">${cols.map(p => { const l = ts.filter(t => (t.assignee_id || '') === p.id && t.status !== 'Done');
+    const m = l.reduce((a, t) => a + Math.max(t.est_min - t.actual_min, 0), 0);
+    return `<div class="col" data-p="${p.id}"><h3>${esc(p.name)}<span>${l.length} · ${hrs(m)}</span></h3>${l.map(card).join('')}</div>`; }).join('')}</div>`;
+  bindCards($('#view'), (id, col) => api('PATCH', `/tasks/${id}`, { assignee_id: col.dataset.p ? Number(col.dataset.p) : null, who: meName() }), '.col');
+}
+
+function list(ts) {
+  $('#view').innerHTML = `<table><thead><tr><th>Task</th><th>Area</th><th>Job</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Due</th><th>Time</th></tr></thead><tbody>${ts.map(t => `
+    <tr class="click" data-id="${t.id}"><td>${esc(t.title)}</td><td>${areaTag(t)}</td><td>${esc(t.job_ref || '')}</td><td>${esc(t.assignee || '—')}</td><td>${t.status}</td><td><span class="pill ${t.priority}">${t.priority}</span></td><td>${dueTag(t)}</td><td>${hrs(t.actual_min)}/${hrs(t.est_min)}</td></tr>`).join('')}</tbody></table>`;
+  document.querySelectorAll('tr.click').forEach(r => r.onclick = () => taskDetail(r.dataset.id));
+}
+
+async function dash() {
+  const d = await api('GET', '/dashboard');
+  const mini = (l, empty) => l.map(t => `<div class="op" data-id="${t.id}" style="cursor:pointer"><div class="grow">${esc(t.title)} <span class="sub">${esc(t.assignee || 'unassigned')} · ${t.due_date || ''}${t.blocked_reason ? ' · ⛔ ' + esc(t.blocked_reason) : ''}</span></div></div>`).join('') || `<div class="sub">${empty}</div>`;
+  $('#view').innerHTML = `<h2>Dashboard</h2><div class="grid">
+    <div class="tile"><div class="sub">Open tasks</div><div class="big">${d.open}</div></div>
+    <div class="tile"><div class="sub">Overdue</div><div class="big ${d.overdue.length ? 'late' : ''}">${d.overdue.length}</div></div>
+    <div class="tile"><div class="sub">Blocked</div><div class="big ${d.blocked.length ? 'late' : ''}">${d.blocked.length}</div></div>
+    <div class="tile"><div class="sub">Unassigned</div><div class="big">${d.unassigned.length}</div></div></div>
+  <div class="grid" style="margin-top:12px"><div class="tile"><h3>⛔ Blocked</h3>${mini(d.blocked, 'Nothing blocked')}</div>
+    <div class="tile"><h3>Overdue</h3>${mini(d.overdue, 'None 🎉')}</div>
+    <div class="tile"><h3>Unassigned</h3>${mini(d.unassigned, 'Everything has an owner')}</div>
+    <div class="tile"><h3>⏱ Running now</h3>${mini(d.running, 'No timers running')}</div></div>
+  <h3>Team workload</h3><table><thead><tr><th>Person</th><th>Open</th><th>Remaining est.</th><th>Overdue</th><th>Done (7d)</th></tr></thead><tbody>${d.workload.map(w => `<tr><td>${esc(w.name)} <span class="sub">${esc(w.role)}</span></td><td>${w.open}</td><td>${hrs(w.remaining_min)}</td><td class="${w.overdue ? 'late' : ''}">${w.overdue}</td><td>${w.done_week}</td></tr>`).join('')}</tbody></table>`;
+  $('#view').onclick = e => { const r = e.target.closest('.op'); if (r) taskDetail(r.dataset.id); };
+}
+
+async function taskDetail(id) {
+  const t = await api('GET', `/tasks/${id}`);
+  const opt = (arr, sel, f = x => x, g = x => x) => arr.map(x => `<option value="${f(x)}" ${f(x) == sel ? 'selected' : ''}>${esc(g(x))}</option>`).join('');
+  dlg.innerHTML = `<div style="display:flex;gap:8px"><input id="f-title" value="${esc(t.title)}" style="flex:1;font-size:18px;font-weight:600"><button onclick="dlg.close()">✕</button></div>
+  <div class="row"><label>Status<select id="f-status">${opt(meta.statuses, t.status)}</select></label>
+   <label>Assignee<select id="f-assignee_id"><option value="">Unassigned</option>${opt(meta.people, t.assignee_id, p => p.id, p => p.name)}</select></label>
+   <label>Priority<select id="f-priority">${opt(meta.priorities, t.priority)}</select></label><label>Due<input id="f-due_date" type="date" value="${t.due_date || ''}"></label></div>
+  <div class="row"><label>Area<select id="f-area_id"><option value="">—</option>${opt(meta.areas, t.area_id, a => a.id, a => a.name)}</select></label>
+   <label>Type<select id="f-type">${opt(meta.types, t.type)}</select></label><label>Job #<input id="f-job_ref" value="${esc(t.job_ref)}" placeholder="from ERP"></label>
+   <label>Part #<input id="f-part_ref" value="${esc(t.part_ref)}"></label><label>Est. minutes<input id="f-est_min" type="number" value="${t.est_min || ''}"></label>
+   <label>Repeats<select id="f-recurrence">${opt(['none', 'daily', 'weekly', 'monthly'], t.recurrence)}</select></label></div>
+  ${t.status === 'Blocked' ? `<label>Blocked because<input id="f-blocked_reason" value="${esc(t.blocked_reason)}"></label>` : ''}
+  <label style="margin-top:8px">Details / instructions<textarea id="f-description" rows="3">${esc(t.description)}</textarea></label>
+  <div class="row" style="align-items:center"><span class="sub" style="flex:2">Time logged: <b>${hrs(t.actual_min)}</b> of ${hrs(t.est_min)} est.</span>
+   ${t.timer_started ? '<button id="tstop">⏸ Pause timer</button>' : '<button id="tstart">▶ Start timer</button>'}</div>
+  <h3>Checklist</h3>${t.checklist.map(c => `<div class="ck"><input type="checkbox" data-ck="${c.id}" ${c.done ? 'checked' : ''}><span class="${c.done ? 'done-t' : ''}">${esc(c.text)}</span><button class="bad" data-ckdel="${c.id}">✕</button></div>`).join('')}
+  <form id="ckf" class="row"><input name="text" placeholder="Add checklist item…" required><button style="flex:0">Add</button></form>
+  <h3>Activity</h3><form id="cf" class="row"><input name="body" placeholder="Comment (@ the next operator, note a problem…)" required><button style="flex:0">Post</button></form>
+  ${t.comments.map(c => `<div class="cmt"><b>${esc(c.who)}</b> <span class="sub">${esc(c.created_at)}</span><div>${esc(c.body)}</div></div>`).join('')}
+  <div class="row" style="margin-top:14px"><button class="bad" id="del" style="flex:0;white-space:nowrap">Delete task</button></div>`;
+  if (!dlg.open) dlg.showModal();
+  const reopen = async () => { await render(); taskDetail(id); };
+  for (const f of ['title', 'status', 'assignee_id', 'priority', 'due_date', 'area_id', 'type', 'job_ref', 'part_ref', 'est_min', 'recurrence', 'blocked_reason', 'description']) {
+    const el = $('#f-' + f); if (!el) continue;
+    el.onchange = async () => {
+      const b = { [f]: el.value, who: meName() };
+      if (f === 'status' && el.value === 'Blocked') b.blocked_reason = prompt('Why is it blocked?') || 'Blocked';
+      if (['assignee_id', 'area_id'].includes(f)) b[f] = el.value ? Number(el.value) : null;
+      await api('PATCH', `/tasks/${id}`, b); reopen();
+    };
+  }
+  $('#tstart')?.addEventListener('click', async () => { await api('POST', `/tasks/${id}/timer/start`, { person_id: me, who: meName() }); reopen(); });
+  $('#tstop')?.addEventListener('click', async () => { await api('POST', `/tasks/${id}/timer/stop`, {}); reopen(); });
+  dlg.querySelectorAll('[data-ck]').forEach(c => c.onchange = async () => { await api('PATCH', `/checklist/${c.dataset.ck}`, { done: c.checked }); reopen(); });
+  dlg.querySelectorAll('[data-ckdel]').forEach(c => c.onclick = async () => { await api('DELETE', `/checklist/${c.dataset.ckdel}`); reopen(); });
+  $('#ckf').onsubmit = async e => { e.preventDefault(); await api('POST', `/tasks/${id}/checklist`, { text: new FormData(e.target).get('text') }); reopen(); };
+  $('#cf').onsubmit = async e => { e.preventDefault(); await api('POST', `/tasks/${id}/comments`, { body: new FormData(e.target).get('body'), who: meName() }); taskDetail(id); };
+  $('#del').onclick = async () => { if (confirm('Delete this task?')) { await api('DELETE', `/tasks/${id}`); dlg.close(); render(); } };
+}
+dlg.addEventListener('close', render);
 render();

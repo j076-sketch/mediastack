@@ -1,19 +1,22 @@
-# JobShop
+# ShopTasks
 
-ClickUp-style work management for sheet metal and CNC machine shops. Zero dependencies — Node 22.13+ only (uses built-in `node:sqlite`).
+Production task and assignment tracker for sheet metal / CNC shops. It does the work the ERP doesn't: who's doing what, what's blocked, what's overdue. Jobs, customers and inventory stay in the ERP; a task just carries an optional Job # / Part # as a reference.
+
+Node 22.13+ only, no dependencies (built-in `node:sqlite`).
 
 ```bash
 cd jobshop
-npm start        # http://localhost:3000, creates jobshop.db with demo data
+npm start        # http://localhost:3000, seeds demo data on first run
 ```
 
-## What's in it
-- **Job Board** – kanban by stage (Quoted → Material Ordered → Ready to Run → In Production → QC → Ready to Ship → Shipped). Drag to move.
-- **Jobs** – job #, customer, PO, part #/rev, qty, material, due date, priority, notes, comment/activity log.
-- **Routing** – per-job operations (laser, brake, weld, mill, lathe, deburr, coat, CMM, ship) with estimates vs. actual time. Templates for sheet metal / milled / turned parts.
-- **Shop Floor** – queue per machine by due date; operators Start/Pause (timer logs actual time) and Done. Ops wait on earlier ops.
-- **Auto stage moves** – first start → In Production; all ops done → QC.
-- **Work Center Load** – backlog in days per machine to find the bottleneck.
-- **Materials** – stock, reorder points, low-stock flags on the dashboard.
+## Features
+- **My Tasks** – pick who you are; tasks grouped Overdue / Today / Upcoming with Start-timer and Done buttons.
+- **Board** – To Do / In Progress / Blocked / Review / Done. Dragging to Blocked asks why.
+- **By Person** – drag tasks onto people to assign; shows remaining estimated hours per person.
+- **All Tasks** – table with filters (area, type, search).
+- **Dashboard** – blocked, overdue, unassigned, running timers, team workload.
+- **Task detail** – checklist (setup steps, first-piece checks), comments/activity log, time tracking, area (Laser, Brake, Weld, CNC…), type (Production, Setup, Maintenance, Quality…), priority, due date.
+- **Recurring tasks** – daily/weekly/monthly (PMs, daily checks); completing one spawns the next.
+- One running timer per person; starting one pauses the other.
 
-Env: `PORT` (default 3000), `DB_FILE` (default `jobshop.db`). No auth yet — run it on the shop LAN.
+Env: `PORT` (default 3000), `DB_FILE` (default `jobshop.db`). No auth yet — LAN only.
