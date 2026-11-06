@@ -1,0 +1,8 @@
+{
+  "name": "jobshop",
+  "version": "0.1.0",
+  "description": "ClickUp-style work management for sheet metal & CNC job shops",
+  "type": "module",
+  "scripts": { "start": "node server.js", "seed": "node server.js --reseed" },
+  "engines": { "node": ">=22.13" }
+}
